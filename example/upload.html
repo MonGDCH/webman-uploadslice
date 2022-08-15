@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>多线程异步大文件分片上传</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        .main {
+            width: 860px;
+            margin: 40px auto;
+        }
+
+        #percent-bg {
+            margin-top: 20px;
+            position: relative;
+            width: 100%;
+            height: 30px;
+            border: 1px solid #ccc;
+        }
+
+        #percent {
+            position: absolute;
+            display: block;
+            width: 0;
+            height: 100%;
+            left: 0;
+            background: #67C23A;
+            z-index: 100;
+        }
+
+        #percent_num {
+            position: absolute;
+            display: block;
+            width: 30px;
+            height: 100%;
+            left: 50%;
+            margin-left: -15px;
+            z-index: 200;
+            font-size: 14px;
+            line-height: 30px;
+            text-align: center;
+        }
+
+        #message {
+            margin-top: 12px;
+            width: 100%;
+            height: 400px;
+            overflow-y: auto;
+            border: 1px solid #ccc;
+            padding: 4px;
+            outline: none;
+            line-height: 20px;
+            font-size: 14px;
+        }
+
+
+        #loading-modal {
+            position: fixed;
+            z-index: 9999999999999999;
+            width: 100vw;
+            height: 100vh;
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0, 0, 0, .5);
+        }
+
+        .loading-main {
+            position: relative;
+            width: 56px;
+            height: 56px;
+        }
+
+        #loading-num {
+            width: 120px;
+            font-size: 14px;
+            margin-top: 8px;
+            transform: translateX(-14px);
+            color: #fff
+        }
+
+        .loading-time {
+            width: 56px;
+            height: 56px;
+            border-bottom: 8px solid #f3f3f3;
+            border-top: 8px solid #f3f3f3;
+            border-color: #3498db #f3f3f3;
+            border-style: solid;
+            border-width: 8px;
+            border-radius: 50%;
+            animation: loading-spin 2s linear infinite;
+            -webkit-animation: loading-spin 2s linear infinite;
+            box-sizing: border-box;
+            /* background: #fff; */
+        }
+
+        @-webkit-keyframes loading-spin {
+            0% {
+                -webkit-transform: rotate(0deg)
+            }
+
+            to {
+                -webkit-transform: rotate(1turn)
+            }
+        }
+
+        @keyframes loading-spin {
+            0% {
+                transform: rotate(0deg)
+            }
+
+            to {
+                transform: rotate(1turn)
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="main">
+        <input type="file" name="file" id="file">
+        <button onclick="send()">上传文件</button>
+        <textarea id="message" readonly></textarea>
+        <div id="percent-bg">
+            <span id="percent"></span>
+            <span id="percent_num">0%</span>
+        </div>
+    </div>
+
+    <div id="loading-modal" style="display: none;">
+        <div class="loading-main">
+            <div class="loading-time"></div>
+            <div id="loading-num">正在解析文件</div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/browser-md5-file@1.1.1/dist/index.umd.min.js"></script>
+    <script>
+        const config = {
+            // 文件大小限制20M
+            "maxSize": 1024 * 1024 * 500,
+            // 单个分片大小
+            "bufferSize": 1024 * 1024,
+            // 上传线程数量
+            "threadNum": 2,
+        }
+
+        // 分片数据集合
+        let blocks = []
+        // 上传的本地文件真实文件名
+        let filename = ''
+        // 文件uuid
+        let uuid = ''
+        // 分片索引
+        let __index = 0;
+        // 当前活跃线程数量
+        let __activeThreadCount = 0;
+        // 已上传的block数量
+        let __sendedBlockCount = 0;
+        // 强制结束进程
+        let stopRun = false;
+        // 上传URL
+        const sednURL = '/upload'
+
+        // 文件上传
+        async function send() {
+            if (document.getElementById("file").files.length < 1) {
+                return false;
+            }
+            const file = document.getElementById("file").files[0]
+            // 验证文件大小
+            if (file.size > config.maxSize) {
+                console.log(111)
+                showMessage("文件大小限制：" + config.maxSize + "，实际文件大小：" + file.size);
+                return;
+            }
+            // 重置上传信息
+            reset()
+            // 打开Loading
+            showLoading(true)
+            // 使用文件md5作为uuid
+            uuid = await getUid(file)
+            // 文件分片
+            let endByte = 0;
+            let startByte = 0;
+            while (true) {
+                startByte = endByte;
+                if (endByte + config.bufferSize >= file.size) {
+                    endByte = file.size;
+                } else {
+                    endByte = endByte + config.bufferSize;
+                }
+                let block = sliceFile(file, startByte, endByte);
+                if (!block) {
+                    showMessage("分片失败");
+                    return;
+                }
+                blocks.push(block);
+                if (endByte >= file.size) {
+                    break;
+                }
+            }
+            // 关闭Loading
+            showLoading(false)
+            showMessage("文件名：" + file.name);
+            showMessage("文件大小：" + file.size);
+            showMessage("总分片数量：" + blocks.length);
+            filename = file.name
+            // 开启上传进程
+            const threadNum = Math.min(config.threadNum, blocks.length);
+            for (var i = 0; i < threadNum; i++) {
+                if (stopRun) {
+                    return;
+                }
+                (function (i) {
+                    setTimeout(function () {
+                        __activeThreadCount++;
+                        run(i);
+                    }, 500);
+                })(i);
+            }
+        }
+        // 获取文件uuid
+        function getUid(file) {
+            const bmf = new browserMD5File()
+            return new Promise((resolve, reject) => {
+                bmf.md5(file, function (err, md5) {
+                    if (err) {
+                        console.error('get uid err:', err);
+                        showMessage('获取文件md5失败!');
+                        return reject(err);
+                    }
+
+                    // console.log('md5 string:', md5);
+                    // uuid = md5
+                    resolve(md5)
+                })
+            })
+
+        }
+        // 重置
+        function reset() {
+            blocks = []
+            filename = ''
+            uuid = ''
+            __index = 0;
+            __activeThreadCount = 0;
+            __sendedBlockCount = 0;
+            stopRun = false
+        }
+        // 运行上传线程
+        function run(i) {
+            if (stopRun) {
+                return;
+            }
+            if (__index >= blocks.length) {
+                showMessage("线程" + i + ' 结束');
+                __activeThreadCount--;
+                if (__activeThreadCount == 0) {
+                    showMessage("------------------------");
+                    showMessage('多线程分片上传完毕，正在处理分片数据...');
+                    merge();
+                }
+                return;
+            }
+            uploadSlice(i, __index);
+            __index++;
+        }
+        // 上传分片
+        function uploadSlice(name, chunkIndex) {
+            showMessage('线程' + name + ' 分片' + chunkIndex + ' start')
+            // 发送数据
+            const formData = new FormData()
+            formData.append('file', blocks[chunkIndex])
+            formData.append('filename', filename)
+            formData.append('chunk', chunkIndex)
+            formData.append('chunkLength', blocks.length)
+            formData.append('uuid', uuid)
+            formData.append('action', 'slice')
+            // 发送请求
+            sendXhr(sednURL, formData, function (result) {
+                if (result.code != '1') {
+                    stopRun = true;
+                    showMessage('上传失败! Message：' + result.msg);
+                    return;
+                }
+                showMessage("线程" + name + " 分片" + chunkIndex + " end");
+                __sendedBlockCount++;
+                showPercent();
+                run(name);
+            })
+        }
+        // 发起合并请求
+        function merge() {
+            // 发送数据
+            const formData = new FormData()
+            formData.append('filename', filename)
+            formData.append('chunkLength', blocks.length)
+            formData.append('uuid', uuid)
+            formData.append('action', 'merge')
+            // 发送请求
+            sendXhr(sednURL, formData, function (result) {
+                if (result.code != '1') {
+                    stopRun = true;
+                    showMessage('上传失败! Message：' + result.msg);
+                    return;
+                }
+                showMessage('分片数据处理完成，任务结束');
+                showMessage("")
+                showMessage("")
+                reset();
+            })
+        }
+        // 分割file
+        function sliceFile(file, startByte, endByte) {
+            if (file.slice) {
+                return file.slice(startByte, endByte);
+            }
+            if (file.webkitSlice) {
+                return file.webkitSlice(startByte, endByte);
+            }
+            if (file.mozSlice) {
+                return file.mozSlice(startByte, endByte);
+            }
+            return null;
+        }
+        //显示进度
+        function showPercent() {
+            var percent = parseInt(__sendedBlockCount / blocks.length * 100);
+            if (percent > 100) { percent = 100; }
+            document.querySelector('#percent').style.width = percent + "%"
+            document.querySelector('#percent_num').innerHTML = percent + "%"
+        }
+        // 渲染消息
+        function showMessage(msg) {
+            const txt = document.querySelector('#message').value
+            const message = txt + msg + "\r\n"
+            document.querySelector('#message').value = message
+            toMessageBottom()
+        }
+        // 消息至底部
+        function toMessageBottom() {
+            var div = document.querySelector('#message');
+            div.scrollTop = div.scrollHeight;
+        }
+        // 已送异步请求
+        function sendXhr(url, data, success, error, headers = {}) {
+            // 1.创建对象
+            let xhr = new XMLHttpRequest();
+            // 2.设置请求行(get请求数据写在url后面)
+            xhr.open('post', url);
+            // 3.设置请求头(get请求可以省略,post不发送数据也可以省略)
+            for (let key in headers) {
+                xhr.setRequestHeader(key, headers[key]);
+            }
+            // 4.注册回调函数
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState == 4) {
+                    if (xhr.status == 200) {
+                        success(JSON.parse(xhr.responseText));
+                    } else {
+                        error(xhr.responseText);
+                    }
+                }
+            };
+            // XHR2.0新增 上传进度监控
+            xhr.upload.onprogress = function (event) {
+                // console.log(event);
+            }
+            // 处理发送数据
+            // let data = new FormData()
+            // let params = this.getAttribute('data-params');
+            // params = JSON.parse(params)
+            // for (let key in params) {
+            //     let value = params[key]
+            //     data.append(key, value)
+            // }
+            // let name = this.getAttribute('name');
+            // data.append(name, file)
+            // 6.请求主体发送
+            xhr.send(data);
+        }
+        // loading
+        function showLoading(show) {
+            if (show) {
+                document.querySelector('#loading-modal').style.display = 'flex'
+            } else {
+                document.querySelector('#loading-modal').style.display = 'none'
+            }
+        }
+    </script>
+</body>
+
+</html>

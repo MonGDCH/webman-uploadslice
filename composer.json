@@ -1,0 +1,13 @@
+{
+  "name": "mongdch/webman-uploadslice",
+  "type": "library",
+  "license": "MIT",
+  "description": "Webman plugin mongdch/webman-uploadslice",
+  "require": {
+  },
+  "autoload": {
+    "psr-4": {
+      "Mongdch\\WebmanUploadslice\\": "src"
+    }
+  }
+}
